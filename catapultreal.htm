@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Catapult Launch (10–100 kg)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; display: flex; gap: 24px; padding: 24px; align-items: flex-start; }
+    #ui { width: 260px; }
+    label { display:block; margin-top:12px; font-weight:600; }
+    input[type=range] { width:100%; }
+    canvas { background: linear-gradient(#bde, #eef); border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.12); }
+    .row { display:flex; gap:8px; align-items:center; margin-top:8px; }
+    button { padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:white; cursor:pointer; }
+    small.note { color:#444; display:block; margin-top:8px; }
+  </style>
+</head>
+<body>
+
+  <div id="ui">
+    <h2>Catapult Launch</h2>
+    <label for="massRange">Mass: <span id="massLabel">50</span> kg</label>
+    <input id="massRange" type="range" min="10" max="100" value="50" step="1">
+    <div class="row">
+      <input id="massNumber" type="number" min="10" max="100" value="50" style="width:84px;padding:6px;border-radius:6px;border:1px solid #ccc">
+      <button id="launchBtn">Launch</button>
+      <button id="resetBtn">Reset</button>
+    </div>
+
+    <label>Settings</label>
+    <div class="row">
+      <label style="font-weight:400; margin-right:8px;"><input id="showTrace" type="checkbox" checked> Show trajectory</label>
+    </div>
+
+    <small class="note">
+      Model: constant energy E → v = √(2E/m). Angle fixed at 45°. Energy E chosen for a visible animation.
+    </small>
+  </div>
+
+  <canvas id="cnv" width="900" height="420"></canvas>
+
+<script>
+(() => {
+  const canvas = document.getElementById('cnv');
+  const ctx = canvas.getContext('2d');
+
+  // UI elements
+  const massRange = document.getElementById('massRange');
+  const massNumber = document.getElementById('massNumber');
+  const massLabel = document.getElementById('massLabel');
+  const launchBtn = document.getElementById('launchBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const showTrace = document.getElementById('showTrace');
+
+  // Physics / display params
+  const E = 20000;           // joules (constant catapult energy) — feel free to tweak
+  const angleDeg = 45;       // fixed launch angle
+  const g = 9.81;            // m/s^2
+  const scale = 5;           // pixels per meter (visual scale)
+  const groundPx = canvas.height - 60; // pixel y for ground line
+
+  // Catapult base position (meters)
+  const catapultX_m = 5;     // horizontal offset from left in meters
+  const catapultY_m = 0;     // ground level (y=0)
+  const catapultPx = { x: catapultX_m * scale, y: groundPx };
+
+  let mass = Number(massRange.value); // kg
+  massLabel.textContent = mass;
+  massNumber.value = mass;
+
+  // Projectile state
+  let running = false;
+  let t0 = 0;
+  let lastTime = 0;
+  let traj = [];
+
+  // Derived initial speed from energy: 0.5 m v^2 = E  => v = sqrt(2E/m)
+  function initialSpeed(m) {
+    return Math.sqrt(2 * E / m);
+  }
+
+  function resetSimulation() {
+    running = false;
+    traj = [];
+    t0 = 0;
+    lastTime = 0;
+    drawScene(); // redraw static scene
+  }
+
+  function launch() {
+    if (running) return;
+    running = true;
+    t0 = 0;
+    traj = [];
+    lastTime = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  function loop(now) {
+    if (!running) return;
+    const dt = (now - lastTime) / 1000; // seconds since last frame
+    lastTime = now;
+    t0 += dt;
+
+    // initial conditions at t = 0
+    const v0 = initialSpeed(mass);              // m/s
+    const angle = angleDeg * Math.PI / 180;
+    const vx = v0 * Math.cos(angle);
+    const vy0 = v0 * Math.sin(angle);
+
+    // position in meters relative to launch point
+    const x_m = catapultX_m + vx * t0;
+    const y_m = catapultY_m + (vy0 * t0 - 0.5 * g * t0 * t0);
+
+    if (y_m < 0) {
+      // hit the ground — stop at the contact point
+      // compute more precise impact time using quadratic if needed
+      running = false;
+      // push final point at y=0
+      traj.push({ x: x_m, y: 0 });
+      drawScene();
+      return;
+    }
+
+    traj.push({ x: x_m, y: y_m });
+    drawScene(x_m, y_m);
+
+    // stop if out of canvas
+    const x_px = x_m * scale;
+    if (x_px > canvas.width + 50) {
+      running = false;
+    } else {
+      requestAnimationFrame(loop);
+    }
+  }
+
+  // drawing helpers
+  function drawScene(currentX_m, currentY_m) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // sky gradient
+    const gsky = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    gsky.addColorStop(0, '#bfefff');
+    gsky.addColorStop(1, '#eaf6ff');
+    ctx.fillStyle = gsky;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // ground
+    ctx.fillStyle = '#7fb36a';
+    ctx.fillRect(0, groundPx, canvas.width, canvas.height - groundPx);
+
+    // ground line
+    ctx.strokeStyle = '#4a5a3a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, groundPx + 0.5);
+    ctx.lineTo(canvas.width, groundPx + 0.5);
+    ctx.stroke();
+
+    // catapult (simple)
+    drawCatapult(catapultPx.x, catapultPx.y);
+
+    // trajectory trace
+    if (showTrace.checked && traj.length) {
+      ctx.beginPath();
+      for (let i = 0; i < traj.length; i++) {
+        const p = traj[i];
+        const px = p.x * scale;
+        const py = groundPx - p.y * scale;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.strokeStyle = 'rgba(60,60,60,0.7)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // projectile (current)
+    if (typeof currentX_m !== 'undefined') {
+      const px = currentX_m * scale;
+      const py = groundPx - currentY_m * scale;
+      drawRock(px, py, Math.max(6, Math.min(18, Math.sqrt(mass) + 4)));
+    }
+
+    // UI text
+    ctx.fillStyle = '#0b3b0b';
+    ctx.font = '14px system-ui,Arial';
+    ctx.fillText(`Mass: ${mass} kg`, 14, 24);
+    const v0 = initialSpeed(mass).toFixed(1);
+    ctx.fillText(`Initial speed ≈ ${v0} m/s`, 14, 44);
+  }
+
+  function drawCatapult(x, groundY) {
+    // base
+    ctx.fillStyle = '#6b4b2a';
+    ctx.fillRect(x - 28, groundY - 12, 56, 12);
+    // arm
+    ctx.save();
+    ctx.translate(x, groundY - 12);
+    ctx.rotate(-Math.PI/4); // show cocked arm
+    ctx.fillStyle = '#8b5a34';
+    ctx.fillRect(0, -6, 110, 10);
+    // sling
+    ctx.fillStyle = '#3b3b3b';
+    ctx.beginPath();
+    ctx.arc(105, 0, 8, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawRock(px, py, radius=10) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.fillStyle = '#666';
+    ctx.shadowColor = 'rgba(0,0,0,0.4)';
+    ctx.shadowBlur = 6;
+    ctx.arc(px, py, radius, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // wire UI
+  function syncMassFromRange() {
+    mass = Number(massRange.value);
+    massLabel.textContent = mass;
+    massNumber.value = mass;
+    if (!running) drawScene();
+  }
+  function syncMassFromNumber() {
+    let v = Number(massNumber.value);
+    if (isNaN(v)) v = 50;
+    v = Math.max(10, Math.min(100, Math.round(v)));
+    massNumber.value = v;
+    massRange.value = v;
+    syncMassFromRange();
+  }
+
+  massRange.addEventListener('input', syncMassFromRange);
+  massNumber.addEventListener('change', syncMassFromNumber);
+  massNumber.addEventListener('input', () => { /* keep in sync but don't round until change */ massRange.value = massNumber.value; massLabel.textContent = massNumber.value; });
+
+  launchBtn.addEventListener('click', () => {
+    // restart simulation with fresh time
+    traj = [];
+    t0 = 0;
+    lastTime = performance.now();
+    running = true;
+    requestAnimationFrame(loop);
+  });
+
+  resetBtn.addEventListener('click', resetSimulation);
+
+  // initial draw
+  resetSimulation();
+
+  // allow clicking canvas to launch as well
+  canvas.addEventListener('click', () => {
+    if (!running) launch();
+  });
+
+})();
+</script>
+</body>
+</html>
