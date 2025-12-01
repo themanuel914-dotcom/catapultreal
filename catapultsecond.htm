@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Onager Catapult Simulation</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #cce7ff; /* light blue page background */
+      color: #111827;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 0;
+      padding: 20px;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .subtitle {
+      font-size: 0.9rem;
+      color: #374151;
+      margin-bottom: 1rem;
+      text-align: center;
+      max-width: 700px;
+    }
+
+    .controls {
+      background: #e5e7eb;
+      border-radius: 12px;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.2);
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    label {
+      font-size: 0.85rem;
+      color: #111827;
+    }
+
+    input[type="range"] {
+      width: 220px;
+    }
+
+    .value-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2px 8px;
+      background: #111827;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      color: #f9fafb;
+      min-width: 52px;
+      text-align: center;
+    }
+
+    button {
+      border: none;
+      padding: 10px 18px;
+      border-radius: 999px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      background: linear-gradient(135deg, #22c55e, #16a34a);
+      color: #022c22;
+      box-shadow: 0 10px 25px rgba(16, 185, 129, 0.45);
+      transition: transform 0.08s ease, box-shadow 0.08s ease, filter 0.08s ease;
+      white-space: nowrap;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 30px rgba(16, 185, 129, 0.6);
+      filter: brightness(1.05);
+    }
+
+    button:active {
+      transform: translateY(1px);
+      box-shadow: 0 4px 12px rgba(16, 185, 129, 0.5);
+      filter: brightness(0.97);
+    }
+
+    canvas {
+      background: #87ceeb; /* sky blue */
+      border-radius: 16px;
+      box-shadow: 0 20px 45px rgba(0, 0, 0, 0.4);
+      border: 1px solid #9ca3af;
+    }
+
+    .note {
+      margin-top: 10px;
+      font-size: 0.8rem;
+      color: #374151;
+      max-width: 700px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>Onager Catapult Simulator</h1>
+  <div class="subtitle">
+    Choose a stone mass in kilograms, then launch. The arm motion is driven by a torsion “spring,” and the stone
+    follows ballistic motion after release.
+  </div>
+
+  <div class="controls">
+    <div class="control-group">
+      <label for="massSlider">
+        Stone mass (kg)
+        <span class="value-badge" id="massValue">10 kg</span>
+      </label>
+      <!-- Roughly realistic torsion catapult stone weights (≈3–40 kg) -->
+      <input
+        type="range"
+        id="massSlider"
+        min="3"
+        max="40"
+        step="1"
+        value="10"
+      />
+    </div>
+
+    <button id="launchBtn">Launch</button>
+  </div>
+
+  <canvas id="simCanvas" width="800" height="400"></canvas>
+
+  <div class="note">
+    Heavier stones add more inertia to the throwing arm, so the arm accelerates more slowly and the projectile leaves
+    with a lower speed. Lighter stones result in a faster arm and a longer throw.
+  </div>
+
+  <script>
+    // ====== Basic setup ======
+    const canvas = document.getElementById("simCanvas");
+    const ctx = canvas.getContext("2d");
+
+    const massSlider = document.getElementById("massSlider");
+    const massValueLabel = document.getElementById("massValue");
+    const launchBtn = document.getElementById("launchBtn");
+
+    massValueLabel.textContent = massSlider.value + " kg";
+
+    massSlider.addEventListener("input", () => {
+      massValueLabel.textContent = massSlider.value + " kg";
+    });
+
+    // ====== World / physics parameters ======
+    const pxPerMeter = 60;                 // Smaller = more space to see trajectory
+    const worldWidth = canvas.width / pxPerMeter;
+    const worldHeight = canvas.height / pxPerMeter;
+
+    // Ground is y = 0 (world coords), y increases upward.
+    // Put pivot near the RIGHT in world space so that when we mirror,
+    // it appears near the LEFT on screen.
+    const pivotX = worldWidth - 2; // ~2 m from right edge in world coords
+    const pivotY = 0.6;            // meters above ground
+
+    const armLength = 2.8; // meters
+    const armMass   = 80;  // kg
+
+    // Moment of inertia of a uniform rod about one end: I = (1/3) m L^2
+    const armInertia = (1 / 3) * armMass * armLength * armLength;
+
+    // Torsion "spring" parameters
+    const torsionK       = 7000;  // N·m/rad
+    const torsionDamping = 80;    // N·m·s/rad
+
+    // Angles (radians), measured from +x axis, CCW.
+    // These are the original good settings: arm starts back/down, swings CCW,
+    // passes vertical, releases when it's up and forward.
+    const thetaRest    = 0.9;   // ~ +50°
+    const thetaRelease = 1.1;   // ~ +63°
+    const thetaCocked  = -0.9;  // ~ -50°
+
+    const g = -9.81; // m/s^2 (y up, so gravity negative)
+
+    // ====== Simulation state ======
+    let theta = thetaCocked;
+    let thetaDot = 0;
+
+    let projectileMass = parseFloat(massSlider.value);
+
+    const projectile = {
+      active: false,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      trail: []
+    };
+
+    // Phases: "idle", "arm", "projectile", "done"
+    let phase = "idle";
+    let lastTimestamp = null;
+
+    // ====== World -> Screen (HORIZONTAL MIRROR) ======
+    // This is the key: we keep physics exactly the same,
+    // but visually mirror horizontally so the catapult appears on the left
+    // and the projectile flies to the right across the screen.
+    function worldToScreen(xWorld, yWorld) {
+      const xScreen = canvas.width - xWorld * pxPerMeter;  // mirror in x
+      const yScreen = canvas.height - yWorld * pxPerMeter; // normal y flip
+      return { x: xScreen, y: yScreen };
+    }
+
+    // ====== Launch logic ======
+    function startSimulation() {
+      projectileMass = parseFloat(massSlider.value);
+
+      theta = thetaCocked;
+      thetaDot = 0;
+
+      projectile.active = false;
+      projectile.trail = [];
+
+      phase = "arm";
+      lastTimestamp = null;
+
+      requestAnimationFrame(loop);
+    }
+
+    launchBtn.addEventListener("click", startSimulation);
+
+    // ====== Physics step ======
+    function step(dt) {
+      if (phase === "arm") {
+        const I = armInertia + projectileMass * armLength * armLength;
+
+        const torqueSpring = -torsionK * (theta - thetaRest);
+        const torqueDamp   = -torsionDamping * thetaDot;
+        const netTorque    = torqueSpring + torqueDamp;
+
+        const alpha = netTorque / I;
+
+        // Semi-implicit Euler
+        thetaDot += alpha * dt;
+        theta    += thetaDot * dt;
+
+        if (theta >= thetaRelease) {
+          theta = thetaRelease;
+          releaseProjectile();
+          phase = "projectile";
+        }
+      } else if (phase === "projectile") {
+        // Free-flight
+        projectile.vy += g * dt;
+        projectile.x  += projectile.vx * dt;
+        projectile.y  += projectile.vy * dt;
+
+        projectile.trail.push({ x: projectile.x, y: projectile.y });
+        if (projectile.trail.length > 200) {
+          projectile.trail.shift();
+        }
+
+        if (projectile.y <= 0) {
+          projectile.y = 0;
+          projectile.vy = 0;
+          phase = "done";
+        }
+      }
+    }
+
+    // ====== Release: tip position & velocity ======
+    function releaseProjectile() {
+      const tipX = pivotX + armLength * Math.cos(theta);
+      const tipY = pivotY + armLength * Math.sin(theta);
+
+      // Rigid arm tip velocity:
+      // r = (L cosθ, L sinθ)
+      // v = ω × r => v = (-ω L sinθ, ω L cosθ)
+      const w  = thetaDot;
+      const vX = -w * armLength * Math.sin(theta); // "left" in world coords
+      const vY =  w * armLength * Math.cos(theta); // "up" in world coords
+
+      projectile.x  = tipX;
+      projectile.y  = tipY;
+      projectile.vx = vX;
+      projectile.vy = vY;
+      projectile.active = true;
+      projectile.trail  = [{ x: tipX, y: tipY }];
+    }
+
+    // ====== Drawing helpers ======
+    function drawFrameAndGround() {
+      ctx.save();
+
+      const groundY = worldToScreen(0, 0).y;
+
+      // Green ground
+      ctx.fillStyle = "#2e7d32";
+      ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+
+      // Ground line
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#14532d";
+      ctx.beginPath();
+      ctx.moveTo(0, groundY);
+      ctx.lineTo(canvas.width, groundY);
+      ctx.stroke();
+
+      // Wooden frame
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = "#6b4f2a"; // dark wood
+
+      const leftPostBottom  = worldToScreen(pivotX - 0.4, 0);
+      const leftPostTop     = worldToScreen(pivotX - 0.4, pivotY + 1.2);
+      const rightPostBottom = worldToScreen(pivotX + 0.4, 0);
+      const rightPostTop    = worldToScreen(pivotX + 0.4, pivotY + 1.2);
+
+      ctx.beginPath();
+      ctx.moveTo(leftPostBottom.x, leftPostBottom.y);
+      ctx.lineTo(leftPostTop.x, leftPostTop.y);
+      ctx.moveTo(rightPostBottom.x, rightPostBottom.y);
+      ctx.lineTo(rightPostTop.x, rightPostTop.y);
+      ctx.stroke();
+
+      // Crossbeam (arm stop)
+      const beamLeft  = worldToScreen(pivotX - 0.5, pivotY + 1.15);
+      const beamRight = worldToScreen(pivotX + 0.5, pivotY + 1.15);
+      ctx.lineWidth = 7;
+      ctx.beginPath();
+      ctx.moveTo(beamLeft.x, beamLeft.y);
+      ctx.lineTo(beamRight.x, beamRight.y);
+      ctx.stroke();
+
+      // Torsion bundle (rope skein)
+      const pivotScreen = worldToScreen(pivotX, pivotY);
+      ctx.lineWidth = 10;
+      ctx.strokeStyle = "#d6b98c"; // rope tan
+      ctx.beginPath();
+      ctx.arc(pivotScreen.x, pivotScreen.y, 14, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawArmAndBucket() {
+      ctx.save();
+
+      const pivotScreen = worldToScreen(pivotX, pivotY);
+      const tipWorldX   = pivotX + armLength * Math.cos(theta);
+      const tipWorldY   = pivotY + armLength * Math.sin(theta);
+      const tipScreen   = worldToScreen(tipWorldX, tipWorldY);
+
+      // Wooden arm
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = "#b5651d"; // medium wood
+      ctx.beginPath();
+      ctx.moveTo(pivotScreen.x, pivotScreen.y);
+      ctx.lineTo(tipScreen.x, tipScreen.y);
+      ctx.stroke();
+
+      // Bucket at tip
+      const bucketRadius = 0.15 * pxPerMeter;
+      ctx.fillStyle = "#8d5524"; // darker wood
+      ctx.beginPath();
+      ctx.arc(tipScreen.x, tipScreen.y, bucketRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawProjectile() {
+      if (phase === "arm" || phase === "idle") {
+        // Stone in bucket
+        const tipWorldX = pivotX + armLength * Math.cos(theta);
+        const tipWorldY = pivotY + armLength * Math.sin(theta);
+        const tipScreen = worldToScreen(tipWorldX, tipWorldY);
+
+        ctx.save();
+        ctx.fillStyle = "#e5e7eb";
+        ctx.beginPath();
+        ctx.arc(tipScreen.x, tipScreen.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      } else if (phase === "projectile" || phase === "done") {
+        if (!projectile.active) return;
+
+        ctx.save();
+
+        // Trajectory trail
+        if (projectile.trail.length > 1) {
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = "rgba(75, 85, 99, 0.7)";
+          ctx.beginPath();
+          const first = worldToScreen(projectile.trail[0].x, projectile.trail[0].y);
+          ctx.moveTo(first.x, first.y);
+          for (let i = 1; i < projectile.trail.length; i++) {
+            const p = worldToScreen(projectile.trail[i].x, projectile.trail[i].y);
+            ctx.lineTo(p.x, p.y);
+          }
+          ctx.stroke();
+        }
+
+        // Stone
+        const stoneScreen = worldToScreen(projectile.x, projectile.y);
+        ctx.fillStyle = "#f9fafb";
+        ctx.beginPath();
+        ctx.arc(stoneScreen.x, stoneScreen.y, 7, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      }
+    }
+
+    function drawBackgroundSky() {
+      // Subtle horizon glow
+      ctx.save();
+      const groundY = worldToScreen(0, 0).y;
+      const gradient = ctx.createLinearGradient(0, groundY - 80, 0, groundY);
+      gradient.addColorStop(0, "rgba(255, 255, 255, 0)");
+      gradient.addColorStop(1, "rgba(255, 255, 255, 0.35)");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, groundY - 80, canvas.width, 80);
+      ctx.restore();
+    }
+
+    // ====== Main draw ======
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawBackgroundSky();
+      drawFrameAndGround();
+      drawArmAndBucket();
+      drawProjectile();
+    }
+
+    // ====== Animation loop ======
+    function loop(timestamp) {
+      if (!lastTimestamp) lastTimestamp = timestamp;
+      let dt = (timestamp - lastTimestamp) / 1000;
+      lastTimestamp = timestamp;
+
+      dt = Math.min(dt, 0.03); // clamp for stability
+
+      step(dt);
+      draw();
+
+      if (phase !== "done") {
+        requestAnimationFrame(loop);
+      }
+    }
+
+    // Initial static render
+    draw();
+  </script>
+</body>
+</html>
