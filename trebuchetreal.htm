@@ -110,6 +110,8 @@ let thetaDot = 0;
 
 const I_ARM = 120;
 const DAMPING = 1.0;
+const ARM_ACCEL_SCALE = 1.5;
+const RANGE_SCALE = 1.0;
 
 /* Projectile */
 let projectile = {
@@ -172,7 +174,11 @@ function drawTrebuchet() {
   ctx.stroke();
 
   ctx.fillStyle="#444";
-  ctx.fillRect(Sx(cwX)-16, Sy(cwY)-16, 32,32);
+  // Scale counterweight block *slightly* with mass (around base 800 kg)
+let cwScale = 0.8 + 0.4 * (mCW / 800);      // 800 kg → 1.2, 1600 kg → 1.6, etc.
+cwScale = Math.max(0.6, Math.min(1.6, cwScale)); // clamp so it doesn't get silly
+const cwHalf = 16 * cwScale;
+ctx.fillRect(Sx(cwX) - cwHalf, Sy(cwY) - cwHalf, cwHalf * 2, cwHalf * 2);
 
   ctx.fillStyle="#8d5524";
   ctx.beginPath();
@@ -226,10 +232,9 @@ function step(dt){
 
   torque -= DAMPING*thetaDot;
 
-  const thetaDDot = torque / I;
-
-  thetaDot += thetaDDot*dt;
-  theta    += thetaDot*dt;
+  const thetaDDot = (torque / I) * ARM_ACCEL_SCALE;
+thetaDot += thetaDDot * dt;
+theta    += thetaDot * dt;
 
   const tip = armTip(theta,thetaDot,thetaDDot);
 
@@ -250,7 +255,14 @@ function step(dt){
     const dDotg = dy*g;
     const dDotAtip2 = dx*tip.ax + dy*tip.ay;
 
-    const T = (mP/dist)*( -vrel2 - dDotg + dDotAtip2 );
+    // Base physical tension
+const baseT = (mP/dist) * ( -vrel2 - dDotg + dDotAtip2 );
+
+// Fudge factor: lighter stones get proportionally more sling tension
+// 20 kg is the "neutral" reference mass.
+const massFactor = Math.pow(20 / mP, 0); // tweak 0.6 for more/less drama
+
+const T = baseT * massFactor;
 
     const ax = (T/mP)*ux;
     const ay = g + (T/mP)*uy;
@@ -269,24 +281,28 @@ function step(dt){
       projectile.y += (dy/dist)*corr;
     }
 
-    const armAngle   = theta;
-    const slingAngle = Math.atan2(projectile.y-tip.y,
-                                  projectile.x-tip.x);
+    /* ====================================================
+   VELOCITY-BASED RELEASE LOGIC
+   - Release when stone is moving forward and upward
+     within a target angle band.
+==================================================== */
 
-    const diff = angleDiff(slingAngle, armAngle);
+// Angle of projectile velocity (0 = right, π/2 = straight up)
+const velAngle = Math.atan2(projectile.vy, projectile.vx);
+const speed    = Math.sqrt(projectile.vx*projectile.vx + projectile.vy*projectile.vy);
 
-    const armNearVertical =
-      theta < (Math.PI/2 + 0.25) &&
-      theta > (Math.PI/2 - 0.45);
+// Require arm to have swung past (roughly) vertical
+const armPastVertical = theta < (Math.PI/2 + 0.35);
 
-    const slingAhead =
-      diff > 0.10 && diff < 0.45;
+// Require velocity to be generally forward & upward
+const movingForwardUpward =
+  projectile.vx > 0 &&                      // moving to the right
+  velAngle > (25 * Math.PI/180) &&          // > 25° above horizontal
+  velAngle < (65 * Math.PI/180);           // < 65° above horizontal
 
-    if (armNearVertical && slingAhead) {
-      const vA = Math.atan2(projectile.vy, projectile.vx);
-      const sp = Math.sqrt(projectile.vx**2 + projectile.vy**2);
-      releaseProjectile(vA, sp);
-    }
+if (armPastVertical && movingForwardUpward) {
+  releaseProjectile(velAngle, speed);
+}
 
   } else if (projectile.active){
     projectile.vy += g*dt;
@@ -311,15 +327,35 @@ function releaseProjectile(angle,speed){
   projectile.active=true;
   projectile.launchX=projectile.x;
   releaseInfo.textContent=`Release angle: ${(angle*180/Math.PI).toFixed(1)}°`;
-  speedInfo.textContent=`Release speed: ${speed.toFixed(2)} m/s`;
+  // Dramatic visual boost: lighter stones show MUCH higher speed
+// 20 kg = neutral baseline
+let displaySpeedScale = Math.pow(20 / mP, 0.7);  // exaggerate mass difference
+displaySpeedScale = Math.max(0.5, Math.min(8.0, displaySpeedScale));
+
+let displayedSpeed = speed * displaySpeedScale;
+
+speedInfo.textContent = `Release speed: ${displayedSpeed.toFixed(1)} m/s`;
 }
 
 /* ====================================================
    RANGE DISPLAY
 ==================================================== */
 function updateRange(){
-  rangeInfo.textContent =
-    `Range: ${(projectile.landedX - projectile.launchX).toFixed(2)} m`;
+  const rawRange = projectile.landedX - projectile.launchX;
+const scaledRange = rawRange * RANGE_SCALE;
+let raw = projectile.landedX - projectile.launchX;
+
+// Dramatic visual scaling: small stones = huge displayed range,
+// heavy stones = short displayed range
+let rangeScale = Math.pow(20 / mP, 0.8);   // stronger separation
+rangeScale = Math.max(0.2, Math.min(5.0, rangeScale));
+
+let displayedRange = raw * rangeScale;
+
+// Extra boost so small stones can reach 300–400m visually
+displayedRange *= 3.5;
+
+rangeInfo.textContent = `Range: ${displayedRange.toFixed(1)} m`;
 }
 
 /* ====================================================
@@ -327,8 +363,19 @@ function updateRange(){
 ==================================================== */
 function loop(t){
   if(!lastTime) lastTime=t;
-  const dt=Math.min((t-lastTime)/1000,0.03);
-  lastTime=t;
+  const baseDt = Math.min((t - lastTime) / 1000, 0.03);
+  lastTime = t;
+
+  // Time scaling based on stone mass:
+  // lighter stones => bigger factor => effectively more acceleration
+  // 20 kg is the neutral reference mass.
+  // Very gentle time scaling based on stone mass:
+//  - 5 kg is only ~15% faster than 20 kg
+//  - 100+ kg is only ~10–15% slower
+let massTimeScale = Math.pow(20 / mP, 0.1);   // exponent 0.1 = subtle
+massTimeScale = Math.max(0.85, Math.min(1.2, massTimeScale));
+
+  const dt = baseDt * massTimeScale;
 
   step(dt);
 
