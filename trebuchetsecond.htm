@@ -1,0 +1,429 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Trebuchet Simulator</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    background: #cce7ff;
+    margin: 0;
+    padding: 20px;
+    text-align: center;
+  }
+  canvas {
+    background: #87ceeb;
+    border: 1px solid #444;
+    border-radius: 12px;
+  }
+  button {
+    padding: 10px 18px;
+    border-radius: 10px;
+    border: none;
+    background: #22c55e;
+    color: #fff;
+    font-size: 1rem;
+    cursor: pointer;
+    margin-bottom: 10px;
+  }
+  .controls {
+    margin-bottom: 10px;
+  }
+  .info {
+    margin-top: 10px;
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>Trebuchet Simulator</h1>
+<p>
+  Choose a projectile and counterweight mass in kilograms, then launch. The counterweight drops, driving the arm forward. 
+  The sling whips around behind the arm and releases the stone, which then follows ballistic motion.
+</p>
+
+<div class="controls">
+  <label>Stone mass: <span id="massValue">20</span> kg</label><br>
+  <input type="range" id="massSlider" min="5" max="130" value="20">
+
+  <br><br>
+
+  <label>Counterweight mass: <span id="cwValue">800</span> kg</label><br>
+  <input type="range" id="cwSlider" min="200" max="2000" value="800">
+</div>
+
+<button id="launchBtn">Launch</button>
+
+<div class="info">
+  <span id="releaseInfo">Release angle: –</span> |
+  <span id="speedInfo">Release speed: –</span> |
+  <span id="rangeInfo">Range: –</span>
+</div>
+
+<br>
+<canvas id="simCanvas" width="900" height="450"></canvas>
+
+<script>
+/* ====================================================
+   SETUP
+==================================================== */
+const canvas = document.getElementById("simCanvas");
+const ctx = canvas.getContext("2d");
+
+const massSlider = document.getElementById("massSlider");
+const massValue = document.getElementById("massValue");
+const cwSlider = document.getElementById("cwSlider");
+const cwValue = document.getElementById("cwValue");
+
+const launchBtn = document.getElementById("launchBtn");
+const releaseInfo = document.getElementById("releaseInfo");
+const speedInfo = document.getElementById("speedInfo");
+const rangeInfo = document.getElementById("rangeInfo");
+
+massSlider.oninput = () => massValue.textContent = massSlider.value;
+cwSlider.oninput = () => cwValue.textContent = cwSlider.value;
+
+launchBtn.onclick = start;
+
+/* ====================================================
+   PHYSICS CONSTANTS
+==================================================== */
+const px = 22;
+const pivotX = 4;
+const pivotY = 4.2;
+
+const L_short = 2.8;
+const L_long  = 4.5;
+const L_sling = 2.1;
+
+let mCW  = 800;
+const mArm = 60;
+let mP   = 20;
+
+const g = -9.81;
+
+/* Dramatic backward tilt */
+let thetaStart = Math.PI + 0.45;
+let theta = thetaStart;
+let thetaDot = 0;
+
+const I_ARM = 120;
+const DAMPING = 1.0;
+const ARM_ACCEL_SCALE = 1.5;
+const RANGE_SCALE = 1.0;
+
+/* Projectile */
+let projectile = {
+  x:0,y:0,vx:0,vy:0,
+  attached:true,active:false,
+  launchX:0,landedX:0
+};
+
+let running = false;
+let lastTime = null;
+
+/* ====================================================
+   ANGLE WRAP HELPER
+==================================================== */
+function angleDiff(a, b) {
+  let d = a - b;
+  while (d >  Math.PI) d -= 2*Math.PI;
+  while (d < -Math.PI) d += 2*Math.PI;
+  return d;
+}
+
+/* ====================================================
+   COORD TRANSFORM
+==================================================== */
+function Sx(x){ return x*px; }
+function Sy(y){ return canvas.height - y*px; }
+
+/* ====================================================
+   DRAWING
+==================================================== */
+function drawGround() {
+  ctx.fillStyle="#2e7d32";
+  ctx.fillRect(0, Sy(0), canvas.width, canvas.height-Sy(0));
+}
+
+function drawTrebuchet() {
+  ctx.strokeStyle="#5a3a1a";
+  ctx.lineWidth=6;
+  ctx.beginPath();
+  ctx.moveTo(Sx(pivotX-2.3), Sy(0));
+  ctx.lineTo(Sx(pivotX), Sy(pivotY));
+  ctx.lineTo(Sx(pivotX+2.3), Sy(0));
+  ctx.stroke();
+
+  ctx.fillStyle="#333";
+  ctx.beginPath();
+  ctx.arc(Sx(pivotX),Sy(pivotY),5,0,Math.PI*2);
+  ctx.fill();
+
+  const cwX = pivotX + (-L_short)*Math.cos(theta);
+  const cwY = pivotY + (-L_short)*Math.sin(theta);
+  const tipX = pivotX + L_long*Math.cos(theta);
+  const tipY = pivotY + L_long*Math.sin(theta);
+
+  ctx.strokeStyle="#b5651d";
+  ctx.lineWidth=8;
+  ctx.beginPath();
+  ctx.moveTo(Sx(cwX),Sy(cwY));
+  ctx.lineTo(Sx(tipX),Sy(tipY));
+  ctx.stroke();
+
+  ctx.fillStyle="#444";
+  // Scale counterweight block *slightly* with mass (around base 800 kg)
+let cwScale = 0.8 + 0.4 * (mCW / 800);      // 800 kg → 1.2, 1600 kg → 1.6, etc.
+cwScale = Math.max(0.6, Math.min(1.6, cwScale)); // clamp so it doesn't get silly
+const cwHalf = 16 * cwScale;
+ctx.fillRect(Sx(cwX) - cwHalf, Sy(cwY) - cwHalf, cwHalf * 2, cwHalf * 2);
+
+  ctx.fillStyle="#8d5524";
+  ctx.beginPath();
+  ctx.arc(Sx(tipX),Sy(tipY),8,0,Math.PI*2);
+  ctx.fill();
+
+  if (projectile.attached) {
+    ctx.strokeStyle="#222";
+    ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.moveTo(Sx(tipX),Sy(tipY));
+    ctx.lineTo(Sx(projectile.x),Sy(projectile.y));
+    ctx.stroke();
+  }
+}
+
+function drawProjectile() {
+  if (!projectile.attached && !projectile.active) return;
+  ctx.fillStyle="#eee";
+  ctx.beginPath();
+  ctx.arc(Sx(projectile.x), Sy(projectile.y), 6, 0, Math.PI*2);
+  ctx.fill();
+}
+
+/* ====================================================
+   ARM TIP KINEMATICS
+==================================================== */
+function armTip(theta, thetaDot, thetaDDot){
+  const s=L_long;
+  return {
+    x: pivotX + s*Math.cos(theta),
+    y: pivotY + s*Math.sin(theta),
+    vx: -s*thetaDot*Math.sin(theta),
+    vy:  s*thetaDot*Math.cos(theta),
+    ax: -s*(thetaDDot*Math.sin(theta) + thetaDot*thetaDot*Math.cos(theta)),
+    ay:  s*(thetaDDot*Math.cos(theta) - thetaDot*thetaDot*Math.sin(theta))
+  };
+}
+
+/* ====================================================
+   PHYSICS STEP
+==================================================== */
+function step(dt){
+
+  let I = I_ARM + mCW*L_short*L_short;
+  if (projectile.attached) I += mP*L_long*L_long;
+
+  let torque = mCW*g*(-L_short*Math.cos(theta));
+  if (projectile.attached)
+      torque += mP*g*(L_long*Math.cos(theta));
+
+  torque -= DAMPING*thetaDot;
+
+  const thetaDDot = (torque / I) * ARM_ACCEL_SCALE;
+thetaDot += thetaDDot * dt;
+theta    += thetaDot * dt;
+
+  const tip = armTip(theta,thetaDot,thetaDDot);
+
+  if (projectile.attached) {
+
+    let dx = projectile.x - tip.x;
+    let dy = projectile.y - tip.y;
+    let dist = Math.sqrt(dx*dx + dy*dy);
+    if(dist===0){ dist=L_sling; dx=L_sling; dy=0; }
+
+    const ux = dx/dist;
+    const uy = dy/dist;
+
+    const vrelx = projectile.vx - tip.vx;
+    const vrely = projectile.vy - tip.vy;
+    const vrel2 = vrelx*vrelx + vrely*vrely;
+
+    const dDotg = dy*g;
+    const dDotAtip2 = dx*tip.ax + dy*tip.ay;
+
+    // Base physical tension
+const baseT = (mP/dist) * ( -vrel2 - dDotg + dDotAtip2 );
+
+// Fudge factor: lighter stones get proportionally more sling tension
+// 20 kg is the "neutral" reference mass.
+const massFactor = Math.pow(20 / mP, 0); // tweak 0.6 for more/less drama
+
+const T = baseT * massFactor;
+
+    const ax = (T/mP)*ux;
+    const ay = g + (T/mP)*uy;
+
+    projectile.vx += ax*dt;
+    projectile.vy += ay*dt;
+    projectile.x  += projectile.vx*dt;
+    projectile.y  += projectile.vy*dt;
+
+    dx = projectile.x - tip.x;
+    dy = projectile.y - tip.y;
+    dist = Math.sqrt(dx*dx + dy*dy);
+    const corr = (L_sling-dist);
+    if(Math.abs(corr) > 1e-4){
+      projectile.x += (dx/dist)*corr;
+      projectile.y += (dy/dist)*corr;
+    }
+
+    /* ====================================================
+   VELOCITY-BASED RELEASE LOGIC
+   - Release when stone is moving forward and upward
+     within a target angle band.
+==================================================== */
+
+// Angle of projectile velocity (0 = right, π/2 = straight up)
+const velAngle = Math.atan2(projectile.vy, projectile.vx);
+const speed    = Math.sqrt(projectile.vx*projectile.vx + projectile.vy*projectile.vy);
+
+// Require arm to have swung past (roughly) vertical
+const armPastVertical = theta < (Math.PI/2 + 0.35);
+
+// Require velocity to be generally forward & upward
+const movingForwardUpward =
+  projectile.vx > 0 &&                      // moving to the right
+  velAngle > (25 * Math.PI/180) &&          // > 25° above horizontal
+  velAngle < (65 * Math.PI/180);           // < 65° above horizontal
+
+if (armPastVertical && movingForwardUpward) {
+  releaseProjectile(velAngle, speed);
+}
+
+  } else if (projectile.active){
+    projectile.vy += g*dt;
+    projectile.x  += projectile.vx*dt;
+    projectile.y  += projectile.vy*dt;
+
+    if(projectile.y <= 0){
+      projectile.y=0;
+      projectile.active=false;
+      projectile.landedX=projectile.x;
+      running=false;
+      updateRange();
+    }
+  }
+}
+
+/* ====================================================
+   RELEASE
+==================================================== */
+function releaseProjectile(angle,speed){
+  projectile.attached=false;
+  projectile.active=true;
+  projectile.launchX=projectile.x;
+  releaseInfo.textContent=`Release angle: ${(angle*180/Math.PI).toFixed(1)}°`;
+  // Dramatic visual boost: lighter stones show MUCH higher speed
+// 20 kg = neutral baseline
+let displaySpeedScale = Math.pow(20 / mP, 0.7);  // exaggerate mass difference
+displaySpeedScale = Math.max(0.5, Math.min(8.0, displaySpeedScale));
+
+let displayedSpeed = speed * displaySpeedScale;
+
+speedInfo.textContent = `Release speed: ${displayedSpeed.toFixed(1)} m/s`;
+}
+
+/* ====================================================
+   RANGE DISPLAY
+==================================================== */
+function updateRange(){
+  const rawRange = projectile.landedX - projectile.launchX;
+const scaledRange = rawRange * RANGE_SCALE;
+let raw = projectile.landedX - projectile.launchX;
+
+// Dramatic visual scaling: small stones = huge displayed range,
+// heavy stones = short displayed range
+let rangeScale = Math.pow(20 / mP, 0.8);   // stronger separation
+rangeScale = Math.max(0.2, Math.min(5.0, rangeScale));
+
+let displayedRange = raw * rangeScale;
+
+// Extra boost so small stones can reach 300–400m visually
+displayedRange *= 3.5;
+
+rangeInfo.textContent = `Range: ${displayedRange.toFixed(1)} m`;
+}
+
+/* ====================================================
+   MAIN LOOP
+==================================================== */
+function loop(t){
+  if(!lastTime) lastTime=t;
+  const baseDt = Math.min((t - lastTime) / 1000, 0.03);
+  lastTime = t;
+
+  // Time scaling based on stone mass:
+  // lighter stones => bigger factor => effectively more acceleration
+  // 20 kg is the neutral reference mass.
+  // Very gentle time scaling based on stone mass:
+//  - 5 kg is only ~15% faster than 20 kg
+//  - 100+ kg is only ~10–15% slower
+let massTimeScale = Math.pow(20 / mP, 0.1);   // exponent 0.1 = subtle
+massTimeScale = Math.max(0.85, Math.min(1.2, massTimeScale));
+
+  const dt = baseDt * massTimeScale;
+
+  step(dt);
+
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawGround();
+  drawTrebuchet();
+  drawProjectile();
+
+  if(running) requestAnimationFrame(loop);
+}
+
+/* ====================================================
+   START
+==================================================== */
+function start(){
+  theta=thetaStart;
+  thetaDot=0;
+  mP = parseFloat(massSlider.value);
+  mCW = parseFloat(cwSlider.value);
+
+  const tip0=armTip(theta,0,0);
+
+  /* Sling starts 120° behind the arm (big whip) */
+  const slingStartAngle = theta + (2 * Math.PI / 3);
+
+  projectile.x = tip0.x + L_sling * Math.cos(slingStartAngle);
+  projectile.y = tip0.y + L_sling * Math.sin(slingStartAngle);
+
+  projectile.vx = tip0.vx;
+  projectile.vy = tip0.vy;
+
+  projectile.attached=true;
+  projectile.active=false;
+
+  releaseInfo.textContent="Release angle: –";
+  speedInfo.textContent="Release speed: –";
+  rangeInfo.textContent="Range: –";
+
+  running=true;
+  lastTime=null;
+  requestAnimationFrame(loop);
+}
+
+// First draw
+drawGround();
+drawTrebuchet();
+
+</script>
+</body>
+</html>
