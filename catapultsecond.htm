@@ -114,17 +114,17 @@
 <body>
   <h1>Onager Catapult Simulator</h1>
   <div class="subtitle">
-    Choose a stone mass in kilograms, then launch. The arm motion is driven by a torsion “spring,” and the stone
+    Choose a stone mass and torsion tension, then launch. The arm motion is driven by a torsion “spring,” and the stone
     follows ballistic motion after release.
   </div>
 
   <div class="controls">
+    <!-- MASS SLIDER -->
     <div class="control-group">
       <label for="massSlider">
         Stone mass (kg)
         <span class="value-badge" id="massValue">10 kg</span>
       </label>
-      <!-- Roughly realistic torsion catapult stone weights (≈3–40 kg) -->
       <input
         type="range"
         id="massSlider"
@@ -135,14 +135,29 @@
       />
     </div>
 
+    <!-- NEW TENSION SLIDER -->
+    <div class="control-group">
+      <label for="tensionSlider">
+        Torsion tension
+        <span class="value-badge" id="tensionValue">7000</span>
+      </label>
+      <input
+        type="range"
+        id="tensionSlider"
+        min="1"
+        max="15"
+        step="1"
+        value="7"
+      />
+    </div>
+
     <button id="launchBtn">Launch</button>
   </div>
 
   <canvas id="simCanvas" width="800" height="400"></canvas>
 
   <div class="note">
-    Heavier stones add more inertia to the throwing arm, so the arm accelerates more slowly and the projectile leaves
-    with a lower speed. Lighter stones result in a faster arm and a longer throw.
+    Higher tension increases arm acceleration and launch speed. Lower tension produces softer throws.
   </div>
 
   <script>
@@ -152,43 +167,50 @@
 
     const massSlider = document.getElementById("massSlider");
     const massValueLabel = document.getElementById("massValue");
+
+    const tensionSlider = document.getElementById("tensionSlider");
+    const tensionValueLabel = document.getElementById("tensionValue");
+
     const launchBtn = document.getElementById("launchBtn");
 
+    // Default text
     massValueLabel.textContent = massSlider.value + " kg";
+    tensionValueLabel.textContent = tensionSlider.value;
 
+    // Update mass
     massSlider.addEventListener("input", () => {
       massValueLabel.textContent = massSlider.value + " kg";
     });
 
     // ====== World / physics parameters ======
-    const pxPerMeter = 60;                 // Smaller = more space to see trajectory
+    const pxPerMeter = 60;
     const worldWidth = canvas.width / pxPerMeter;
     const worldHeight = canvas.height / pxPerMeter;
 
-    // Ground is y = 0 (world coords), y increases upward.
-    // Put pivot near the RIGHT in world space so that when we mirror,
-    // it appears near the LEFT on screen.
-    const pivotX = worldWidth - 2; // ~2 m from right edge in world coords
-    const pivotY = 0.6;            // meters above ground
+    const pivotX = worldWidth - 2;
+    const pivotY = 0.6;
 
-    const armLength = 2.8; // meters
-    const armMass   = 80;  // kg
+    const armLength = 2.8;
+    const armMass   = 80;
 
-    // Moment of inertia of a uniform rod about one end: I = (1/3) m L^2
     const armInertia = (1 / 3) * armMass * armLength * armLength;
 
-    // Torsion "spring" parameters
-    const torsionK       = 7000;  // N·m/rad
-    const torsionDamping = 80;    // N·m·s/rad
+    // Make torsionK adjustable
+    let torsionK = 7000;
+    const torsionDamping = 80;
 
-    // Angles (radians), measured from +x axis, CCW.
-    // These are the original good settings: arm starts back/down, swings CCW,
-    // passes vertical, releases when it's up and forward.
-    const thetaRest    = 0.9;   // ~ +50°
-    const thetaRelease = 1.1;   // ~ +63°
-    const thetaCocked  = -0.9;  // ~ -50°
+    // Update tension live
+    tensionSlider.addEventListener("input", () => {
+  const uiValue = parseInt(tensionSlider.value);
+  torsionK = uiValue * 1000;           // ✔ scale to physics value
+  tensionValueLabel.textContent = uiValue;
+});
 
-    const g = -9.81; // m/s^2 (y up, so gravity negative)
+    const thetaRest    = 0.9;
+    const thetaRelease = 1.1;
+    const thetaCocked  = -0.9;
+
+    const g = -9.81;
 
     // ====== Simulation state ======
     let theta = thetaCocked;
@@ -205,21 +227,18 @@
       trail: []
     };
 
-    // Phases: "idle", "arm", "projectile", "done"
     let phase = "idle";
     let lastTimestamp = null;
 
-    // ====== World -> Screen (HORIZONTAL MIRROR) ======
-    // This is the key: we keep physics exactly the same,
-    // but visually mirror horizontally so the catapult appears on the left
-    // and the projectile flies to the right across the screen.
+    // ====== World → Screen with horizontal mirror ======
     function worldToScreen(xWorld, yWorld) {
-      const xScreen = canvas.width - xWorld * pxPerMeter;  // mirror in x
-      const yScreen = canvas.height - yWorld * pxPerMeter; // normal y flip
-      return { x: xScreen, y: yScreen };
+      return {
+        x: canvas.width - xWorld * pxPerMeter,
+        y: canvas.height - yWorld * pxPerMeter
+      };
     }
 
-    // ====== Launch logic ======
+    // ====== Launch ======
     function startSimulation() {
       projectileMass = parseFloat(massSlider.value);
 
@@ -237,7 +256,7 @@
 
     launchBtn.addEventListener("click", startSimulation);
 
-    // ====== Physics step ======
+    // ====== Physics ======
     function step(dt) {
       if (phase === "arm") {
         const I = armInertia + projectileMass * armLength * armLength;
@@ -246,9 +265,10 @@
         const torqueDamp   = -torsionDamping * thetaDot;
         const netTorque    = torqueSpring + torqueDamp;
 
+        
+
         const alpha = netTorque / I;
 
-        // Semi-implicit Euler
         thetaDot += alpha * dt;
         theta    += thetaDot * dt;
 
@@ -257,16 +277,14 @@
           releaseProjectile();
           phase = "projectile";
         }
-      } else if (phase === "projectile") {
-        // Free-flight
+      } 
+      else if (phase === "projectile") {
         projectile.vy += g * dt;
         projectile.x  += projectile.vx * dt;
         projectile.y  += projectile.vy * dt;
 
         projectile.trail.push({ x: projectile.x, y: projectile.y });
-        if (projectile.trail.length > 200) {
-          projectile.trail.shift();
-        }
+        if (projectile.trail.length > 200) projectile.trail.shift();
 
         if (projectile.y <= 0) {
           projectile.y = 0;
@@ -276,37 +294,32 @@
       }
     }
 
-    // ====== Release: tip position & velocity ======
+    // ====== Release ======
     function releaseProjectile() {
       const tipX = pivotX + armLength * Math.cos(theta);
       const tipY = pivotY + armLength * Math.sin(theta);
 
-      // Rigid arm tip velocity:
-      // r = (L cosθ, L sinθ)
-      // v = ω × r => v = (-ω L sinθ, ω L cosθ)
       const w  = thetaDot;
-      const vX = -w * armLength * Math.sin(theta); // "left" in world coords
-      const vY =  w * armLength * Math.cos(theta); // "up" in world coords
+      const vX = -w * armLength * Math.sin(theta);
+      const vY =  w * armLength * Math.cos(theta);
 
-      projectile.x  = tipX;
-      projectile.y  = tipY;
+      projectile.x = tipX;
+      projectile.y = tipY;
       projectile.vx = vX;
       projectile.vy = vY;
       projectile.active = true;
-      projectile.trail  = [{ x: tipX, y: tipY }];
+      projectile.trail = [{ x: tipX, y: tipY }];
     }
 
-    // ====== Drawing helpers ======
+    // ====== Drawing ======
     function drawFrameAndGround() {
       ctx.save();
 
       const groundY = worldToScreen(0, 0).y;
 
-      // Green ground
       ctx.fillStyle = "#2e7d32";
       ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
 
-      // Ground line
       ctx.lineWidth = 2;
       ctx.strokeStyle = "#14532d";
       ctx.beginPath();
@@ -316,7 +329,7 @@
 
       // Wooden frame
       ctx.lineWidth = 5;
-      ctx.strokeStyle = "#6b4f2a"; // dark wood
+      ctx.strokeStyle = "#6b4f2a";
 
       const leftPostBottom  = worldToScreen(pivotX - 0.4, 0);
       const leftPostTop     = worldToScreen(pivotX - 0.4, pivotY + 1.2);
@@ -330,7 +343,6 @@
       ctx.lineTo(rightPostTop.x, rightPostTop.y);
       ctx.stroke();
 
-      // Crossbeam (arm stop)
       const beamLeft  = worldToScreen(pivotX - 0.5, pivotY + 1.15);
       const beamRight = worldToScreen(pivotX + 0.5, pivotY + 1.15);
       ctx.lineWidth = 7;
@@ -339,10 +351,9 @@
       ctx.lineTo(beamRight.x, beamRight.y);
       ctx.stroke();
 
-      // Torsion bundle (rope skein)
       const pivotScreen = worldToScreen(pivotX, pivotY);
       ctx.lineWidth = 10;
-      ctx.strokeStyle = "#d6b98c"; // rope tan
+      ctx.strokeStyle = "#d6b98c";
       ctx.beginPath();
       ctx.arc(pivotScreen.x, pivotScreen.y, 14, 0, Math.PI * 2);
       ctx.stroke();
@@ -354,21 +365,19 @@
       ctx.save();
 
       const pivotScreen = worldToScreen(pivotX, pivotY);
-      const tipWorldX   = pivotX + armLength * Math.cos(theta);
-      const tipWorldY   = pivotY + armLength * Math.sin(theta);
-      const tipScreen   = worldToScreen(tipWorldX, tipWorldY);
+      const tipWorldX = pivotX + armLength * Math.cos(theta);
+      const tipWorldY = pivotY + armLength * Math.sin(theta);
+      const tipScreen = worldToScreen(tipWorldX, tipWorldY);
 
-      // Wooden arm
       ctx.lineWidth = 6;
-      ctx.strokeStyle = "#b5651d"; // medium wood
+      ctx.strokeStyle = "#b5651d";
       ctx.beginPath();
       ctx.moveTo(pivotScreen.x, pivotScreen.y);
       ctx.lineTo(tipScreen.x, tipScreen.y);
       ctx.stroke();
 
-      // Bucket at tip
       const bucketRadius = 0.15 * pxPerMeter;
-      ctx.fillStyle = "#8d5524"; // darker wood
+      ctx.fillStyle = "#8d5524";
       ctx.beginPath();
       ctx.arc(tipScreen.x, tipScreen.y, bucketRadius, 0, Math.PI * 2);
       ctx.fill();
@@ -378,7 +387,6 @@
 
     function drawProjectile() {
       if (phase === "arm" || phase === "idle") {
-        // Stone in bucket
         const tipWorldX = pivotX + armLength * Math.cos(theta);
         const tipWorldY = pivotY + armLength * Math.sin(theta);
         const tipScreen = worldToScreen(tipWorldX, tipWorldY);
@@ -389,12 +397,12 @@
         ctx.arc(tipScreen.x, tipScreen.y, 6, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
-      } else if (phase === "projectile" || phase === "done") {
+      } 
+      else {
         if (!projectile.active) return;
 
         ctx.save();
 
-        // Trajectory trail
         if (projectile.trail.length > 1) {
           ctx.lineWidth = 2;
           ctx.strokeStyle = "rgba(75, 85, 99, 0.7)";
@@ -408,7 +416,6 @@
           ctx.stroke();
         }
 
-        // Stone
         const stoneScreen = worldToScreen(projectile.x, projectile.y);
         ctx.fillStyle = "#f9fafb";
         ctx.beginPath();
@@ -420,7 +427,6 @@
     }
 
     function drawBackgroundSky() {
-      // Subtle horizon glow
       ctx.save();
       const groundY = worldToScreen(0, 0).y;
       const gradient = ctx.createLinearGradient(0, groundY - 80, 0, groundY);
@@ -431,7 +437,6 @@
       ctx.restore();
     }
 
-    // ====== Main draw ======
     function draw() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       drawBackgroundSky();
@@ -446,7 +451,7 @@
       let dt = (timestamp - lastTimestamp) / 1000;
       lastTimestamp = timestamp;
 
-      dt = Math.min(dt, 0.03); // clamp for stability
+      dt = Math.min(dt, 0.03);
 
       step(dt);
       draw();
@@ -456,8 +461,7 @@
       }
     }
 
-    // Initial static render
-    draw();
+    draw(); // initial static draw
   </script>
 </body>
 </html>
